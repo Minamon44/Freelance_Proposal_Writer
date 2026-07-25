@@ -2,7 +2,7 @@
 
 /**
  * ProposalForm – the main proposal generation form.
- * Reads merged skills from the Zustand store (CV + LinkedIn) and
+ * Reads detected CV skills from the Zustand store and
  * injects them automatically into the request.
  */
 
@@ -57,7 +57,7 @@ export default function ProposalForm() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProposalResponse | null>(null);
 
-  const { mergedSkills, cvText, cvUploaded, linkedInFetched } = useProfileStore();
+  const { cvSkills } = useProfileStore();
 
   const set = (field: keyof FormState) =>
     (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
@@ -73,8 +73,8 @@ export default function ProposalForm() {
     setError(null);
     setLoading(true);
 
-    // Build merged skills string: profile skills + any extra typed by user
-    const profileSkillsStr = mergedSkills.join(", ");
+    // Build merged skills string: CV skills + any extra typed by user
+    const profileSkillsStr = cvSkills.join(", ");
     const allSkills = [profileSkillsStr, form.extraSkills]
       .filter(Boolean)
       .join(", ");
@@ -87,8 +87,8 @@ export default function ProposalForm() {
       freelancer_skills: allSkills || undefined,
       hourly_rate: form.hourlyRate || undefined,
       delivery_days: form.deliveryDays ? parseInt(form.deliveryDays) : undefined,
-      // Inject CV text if available (backend truncates to 1500 chars)
-      cv_context: cvUploaded ? cvText : undefined,
+      // cv_context and portfolio_url are auto-filled server-side from the
+      // stored Experience record — no need to send them from here.
     };
 
     try {
@@ -192,9 +192,9 @@ export default function ProposalForm() {
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label htmlFor="extra-skills">
               Skills{" "}
-              {mergedSkills.length > 0 ? (
+              {cvSkills.length > 0 ? (
                 <span className="tag tag-green" style={{ marginLeft: 6, verticalAlign: "middle" }}>
-                  {mergedSkills.length} from profile
+                  {cvSkills.length} from profile
                 </span>
               ) : null}
             </label>
@@ -202,20 +202,20 @@ export default function ProposalForm() {
               id="extra-skills"
               type="text"
               placeholder={
-                mergedSkills.length > 0
+                cvSkills.length > 0
                   ? "Add more skills (optional, comma-separated)"
                   : "Python, SQL, FastAPI… (comma-separated)"
               }
               value={form.extraSkills}
               onChange={set("extraSkills")}
             />
-            {mergedSkills.length > 0 && (
+            {cvSkills.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
-                {mergedSkills.slice(0, 12).map((s) => (
+                {cvSkills.slice(0, 12).map((s) => (
                   <span key={s} className="tag tag-amber">{s}</span>
                 ))}
-                {mergedSkills.length > 12 && (
-                  <span className="tag tag-blue">+{mergedSkills.length - 12}</span>
+                {cvSkills.length > 12 && (
+                  <span className="tag tag-blue">+{cvSkills.length - 12}</span>
                 )}
               </div>
             )}

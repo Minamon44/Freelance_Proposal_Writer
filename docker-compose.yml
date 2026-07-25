@@ -1,6 +1,25 @@
 version: "3.9"
 
 services:
+  # ── PostgreSQL (local dev only — production uses Railway's managed Postgres) ──
+  db:
+    image: postgres:16-alpine
+    container_name: fpw-db
+    environment:
+      - POSTGRES_USER=fpw
+      - POSTGRES_PASSWORD=fpw_local_dev
+      - POSTGRES_DB=fpw
+    volumes:
+      - fpw-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fpw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # ── FastAPI backend ──────────────────────────────────────
   backend:
     build:
@@ -11,8 +30,12 @@ services:
       - "8000:8000"
     environment:
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - DATABASE_URL=postgresql://fpw:fpw_local_dev@db:5432/fpw
     env_file:
       - ./backend/.env          # create from .env.example
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -38,3 +61,6 @@ services:
 networks:
   default:
     name: fpw-network
+
+volumes:
+  fpw-db-data:

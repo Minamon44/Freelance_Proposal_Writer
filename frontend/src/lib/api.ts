@@ -31,6 +31,7 @@ export interface ProposalRequest {
   hourly_rate?: string;
   delivery_days?: number;
   cv_context?: string;
+  portfolio_url?: string;
 }
 
 export interface ProposalResponse {
@@ -43,19 +44,11 @@ export interface ProposalResponse {
   word_count: number;
 }
 
-export interface CVUploadResponse {
-  extracted_text: string;
-  detected_skills: string[];
-  file_type: string;
-  char_count: number;
-}
-
-export interface LinkedInResponse {
-  name: string | null;
-  headline: string | null;
-  skills: string[];
-  summary: string | null;
-  raw_text: string;
+export interface ExperienceResponse {
+  cv_filename: string | null;
+  cv_skills: string[];
+  has_cv: boolean;
+  portfolio_url: string | null;
 }
 
 // ── API functions ─────────────────────────────────────────────────────────
@@ -70,22 +63,20 @@ export async function generateProposal(
   });
 }
 
-export async function uploadCV(file: File): Promise<CVUploadResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  return request<CVUploadResponse>("/upload-cv/", {
-    method: "POST",
-    body: form,
-  });
+export async function getExperience(): Promise<ExperienceResponse> {
+  return request<ExperienceResponse>("/api/experience/", { method: "GET" });
 }
 
-export async function fetchLinkedIn(
-  profile_url: string
-): Promise<LinkedInResponse> {
-  return request<LinkedInResponse>("/fetch-linkedin/", {
+export async function saveExperience(
+  portfolioUrl: string,
+  cvFile?: File | null
+): Promise<ExperienceResponse> {
+  const form = new FormData();
+  form.append("portfolio_url", portfolioUrl);
+  if (cvFile) form.append("cv", cvFile);
+  return request<ExperienceResponse>("/api/experience/", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ profile_url }),
+    body: form,
   });
 }
 

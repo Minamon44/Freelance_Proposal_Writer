@@ -1,26 +1,29 @@
 """
 Freelance Proposal Writer – FastAPI Backend
-Endpoints: /health, /generate, /upload-cv, /fetch-linkedin
+Endpoints: /health, /generate, /api/experience
 """
 from dotenv import load_dotenv
 load_dotenv()  # loads .env before anything else
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 
-from routers import proposal, cv, linkedin
+from routers import proposal, experience
+from database import engine, Base
+import db_models  # noqa: F401 – must be imported so its table is registered on Base
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Freelance Proposal Writer API starting up…")
+    Base.metadata.create_all(bind=engine)
     yield
     print("🛑 API shutting down…")
 
 app = FastAPI(
     title="Freelance Proposal Writer API",
     version="1.0.0",
-    description="AI-powered freelance proposal generation with CV & LinkedIn parsing",
+    description="AI-powered freelance proposal generation with stored CV & portfolio",
     lifespan=lifespan,
 )
 
@@ -30,8 +33,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
-        "https://*.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.(vercel\.app|up\.railway\.app)",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -39,8 +42,7 @@ app.add_middleware(
 
 # Mount routers
 app.include_router(proposal.router, tags=["Proposal"])
-app.include_router(cv.router, prefix="/upload-cv", tags=["CV Upload"])
-app.include_router(linkedin.router, prefix="/fetch-linkedin", tags=["LinkedIn"])
+app.include_router(experience.router, prefix="/api/experience", tags=["Experience"])
 
 
 @app.get("/health", tags=["Health"])

@@ -8,12 +8,11 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
-  const { cvUploaded, linkedInFetched, mergedSkills } = useProfileStore();
+  const { cvUploaded, portfolioUrl, cvSkills } = useProfileStore();
 
   const navItems = [
-    { id: "generate",  icon: "✨", label: "Generate Proposal" },
-    { id: "cv",        icon: "📄", label: "Upload CV",       badge: cvUploaded ? "✓" : undefined },
-    { id: "linkedin",  icon: "🔗", label: "LinkedIn Import", badge: linkedInFetched ? "✓" : undefined },
+    { id: "generate",   icon: "✨", label: "Generate Proposal" },
+    { id: "experience", icon: "📄", label: "Experience", badge: cvUploaded || portfolioUrl ? "✓" : undefined },
   ];
 
   return (
@@ -36,18 +35,18 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
         </button>
       ))}
 
-      {mergedSkills.length > 0 && (
+      {cvSkills.length > 0 && (
         <>
           <div className="divider" />
           <div className="nav-section-label">Profile Skills</div>
           <div style={{ padding: "0 12px", display: "flex", flexWrap: "wrap", gap: 4 }}>
-            {mergedSkills.slice(0, 10).map((s) => (
+            {cvSkills.slice(0, 10).map((s) => (
               <span key={s} className="tag tag-amber" style={{ marginBottom: 2 }}>
                 {s}
               </span>
             ))}
-            {mergedSkills.length > 10 && (
-              <span className="tag tag-blue">+{mergedSkills.length - 10}</span>
+            {cvSkills.length > 10 && (
+              <span className="tag tag-blue">+{cvSkills.length - 10}</span>
             )}
           </div>
         </>

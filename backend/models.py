@@ -40,7 +40,11 @@ class ProposalRequest(BaseModel):
     delivery_days: Optional[int] = Field(default=None, ge=1, le=365)
     cv_context: Optional[str] = Field(
         default=None,
-        description="Pre-parsed CV text injected by frontend after upload"
+        description="CV text; auto-filled server-side from the stored Experience record if omitted"
+    )
+    portfolio_url: Optional[str] = Field(
+        default=None,
+        description="Portfolio link; auto-filled server-side from the stored Experience record if omitted"
     )
 
 
@@ -61,13 +65,9 @@ class CVUploadResponse(BaseModel):
     char_count: int
 
 
-class LinkedInRequest(BaseModel):
-    profile_url: str = Field(..., description="Public LinkedIn profile URL")
-
-
-class LinkedInResponse(BaseModel):
-    name: Optional[str] = None
-    headline: Optional[str] = None
-    skills: list[str] = Field(default_factory=list)
-    summary: Optional[str] = None
-    raw_text: str
+class ExperienceResponse(BaseModel):
+    """Returned by GET /api/experience/ — the stored profile, if any."""
+    cv_filename: Optional[str] = None
+    cv_skills: list[str] = Field(default_factory=list)
+    has_cv: bool = False
+    portfolio_url: Optional[str] = None

@@ -88,6 +88,9 @@ def _user_prompt(req: ProposalRequest) -> str:
         # Truncate to avoid context overflow
         parts.append(f"**CV Summary (first 1500 chars):**\n{req.cv_context[:1500]}")
 
+    if req.portfolio_url:
+        parts.append(f"**Portfolio:** {req.portfolio_url}")
+
     if req.hourly_rate:
         parts.append(f"**My Rate:** {req.hourly_rate}")
 

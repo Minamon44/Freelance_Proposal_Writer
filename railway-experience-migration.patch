@@ -1,0 +1,1403 @@
+diff --git a/backend/database.py b/backend/database.py
+new file mode 100644
+index 0000000..fa082c5
+--- /dev/null
++++ b/backend/database.py
+@@ -0,0 +1,32 @@
++"""
++Database connection setup. On Railway, add a PostgreSQL plugin to your
++project and it auto-injects DATABASE_URL into this service's environment.
++"""
++
++import os
++from sqlalchemy import create_engine
++from sqlalchemy.orm import sessionmaker, declarative_base
++
++DATABASE_URL = os.getenv("DATABASE_URL")
++
++if not DATABASE_URL:
++    raise RuntimeError(
++        "DATABASE_URL is not set. On Railway, add a PostgreSQL database to "
++        "this project and it will be injected automatically."
++    )
++
++# Railway (like Render/Heroku) sometimes provides "postgres://"; SQLAlchemy 2.x requires "postgresql://"
++if DATABASE_URL.startswith("postgres://"):
++    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
++
++engine = create_engine(DATABASE_URL, pool_pre_ping=True)
++SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
++Base = declarative_base()
++
++
++def get_db():
++    db = SessionLocal()
++    try:
++        yield db
++    finally:
++        db.close()
+diff --git a/backend/db_models.py b/backend/db_models.py
+new file mode 100644
+index 0000000..7001e5b
+--- /dev/null
++++ b/backend/db_models.py
+@@ -0,0 +1,22 @@
++"""
++SQLAlchemy ORM models. Separate from models.py (which holds Pydantic
++request/response schemas) to keep the two layers distinct.
++"""
++
++from sqlalchemy import Column, Integer, String, Text, DateTime, func
++from database import Base
++
++
++class Experience(Base):
++    """
++    Single-row table holding the freelancer's stored CV text + portfolio link.
++    id is always 1 — this app is single-user, so there's one profile record.
++    """
++    __tablename__ = "experience"
++
++    id = Column(Integer, primary_key=True, index=True)
++    cv_text = Column(Text, nullable=True)
++    cv_filename = Column(String, nullable=True)
++    cv_skills = Column(Text, nullable=True)  # stored as comma-separated string
++    portfolio_url = Column(String, nullable=True)
++    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+diff --git a/backend/main.py b/backend/main.py
+index 9a5361d..cf98285 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -1,26 +1,29 @@
+ """
+ Freelance Proposal Writer – FastAPI Backend
+-Endpoints: /health, /generate, /upload-cv, /fetch-linkedin
++Endpoints: /health, /generate, /api/experience
+ """
+ from dotenv import load_dotenv
+ load_dotenv()  # loads .env before anything else
+-from fastapi import FastAPI, UploadFile, File, HTTPException
++from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+ from contextlib import asynccontextmanager
+ import uvicorn
+ 
+-from routers import proposal, cv, linkedin
++from routers import proposal, experience
++from database import engine, Base
++import db_models  # noqa: F401 – must be imported so its table is registered on Base
+ 
+ @asynccontextmanager
+ async def lifespan(app: FastAPI):
+     print("🚀 Freelance Proposal Writer API starting up…")
++    Base.metadata.create_all(bind=engine)
+     yield
+     print("🛑 API shutting down…")
+ 
+ app = FastAPI(
+     title="Freelance Proposal Writer API",
+     version="1.0.0",
+-    description="AI-powered freelance proposal generation with CV & LinkedIn parsing",
++    description="AI-powered freelance proposal generation with stored CV & portfolio",
+     lifespan=lifespan,
+ )
+ 
+@@ -30,8 +33,8 @@ app.add_middleware(
+     allow_origins=[
+         "http://localhost:3000",
+         "http://localhost:3001",
+-        "https://*.vercel.app",
+     ],
++    allow_origin_regex=r"https://.*\.(vercel\.app|up\.railway\.app)",
+     allow_credentials=True,
+     allow_methods=["*"],
+     allow_headers=["*"],
+@@ -39,8 +42,7 @@ app.add_middleware(
+ 
+ # Mount routers
+ app.include_router(proposal.router, tags=["Proposal"])
+-app.include_router(cv.router, prefix="/upload-cv", tags=["CV Upload"])
+-app.include_router(linkedin.router, prefix="/fetch-linkedin", tags=["LinkedIn"])
++app.include_router(experience.router, prefix="/api/experience", tags=["Experience"])
+ 
+ 
+ @app.get("/health", tags=["Health"])
+diff --git a/backend/models.py b/backend/models.py
+index 36db1a2..6d3213e 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -40,7 +40,11 @@ class ProposalRequest(BaseModel):
+     delivery_days: Optional[int] = Field(default=None, ge=1, le=365)
+     cv_context: Optional[str] = Field(
+         default=None,
+-        description="Pre-parsed CV text injected by frontend after upload"
++        description="CV text; auto-filled server-side from the stored Experience record if omitted"
++    )
++    portfolio_url: Optional[str] = Field(
++        default=None,
++        description="Portfolio link; auto-filled server-side from the stored Experience record if omitted"
+     )
+ 
+ 
+@@ -61,13 +65,9 @@ class CVUploadResponse(BaseModel):
+     char_count: int
+ 
+ 
+-class LinkedInRequest(BaseModel):
+-    profile_url: str = Field(..., description="Public LinkedIn profile URL")
+-
+-
+-class LinkedInResponse(BaseModel):
+-    name: Optional[str] = None
+-    headline: Optional[str] = None
+-    skills: list[str] = Field(default_factory=list)
+-    summary: Optional[str] = None
+-    raw_text: str
++class ExperienceResponse(BaseModel):
++    """Returned by GET /api/experience/ — the stored profile, if any."""
++    cv_filename: Optional[str] = None
++    cv_skills: list[str] = Field(default_factory=list)
++    has_cv: bool = False
++    portfolio_url: Optional[str] = None
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 50805d4..e1ae0df 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -9,14 +9,13 @@ groq==0.8.0
+ pypdf==4.2.0
+ python-docx==1.1.2
+ 
+-# LinkedIn scraping
+-requests==2.31.0
+-beautifulsoup4==4.12.3
+-lxml==5.2.1
+-
+ # HTTP client (keep compatible with groq)
+ httpx==0.27.0
+ 
++# Database (Experience storage: CV text + portfolio link)
++sqlalchemy==2.0.30
++psycopg2-binary==2.9.9
++
+ # Async support
+ anyio==4.3.0
+ 
+diff --git a/backend/routers/cv.py b/backend/routers/cv.py
+deleted file mode 100644
+index 69d48df..0000000
+--- a/backend/routers/cv.py
++++ /dev/null
+@@ -1,41 +0,0 @@
+-"""
+-/upload-cv endpoint – parse PDF or DOCX and extract skills.
+-"""
+-
+-from fastapi import APIRouter, UploadFile, File, HTTPException
+-from models import CVUploadResponse
+-from services.cv_parser import parse_cv
+-
+-router = APIRouter()
+-
+-ALLOWED_TYPES = {
+-    "application/pdf",
+-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+-    "application/msword",
+-}
+-
+-MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+-
+-
+-@router.post("/", response_model=CVUploadResponse)
+-async def upload_cv(file: UploadFile = File(...)) -> CVUploadResponse:
+-    """
+-    Accept a PDF or DOCX CV, extract raw text, and detect skill keywords.
+-    Returns extracted text so the frontend can inject it into subsequent requests.
+-    """
+-    # Validate content type
+-    if file.content_type not in ALLOWED_TYPES:
+-        raise HTTPException(
+-            status_code=415,
+-            detail=f"Unsupported file type '{file.content_type}'. Upload a PDF or DOCX.",
+-        )
+-
+-    raw = await file.read()
+-
+-    if len(raw) > MAX_SIZE_BYTES:
+-        raise HTTPException(status_code=413, detail="File exceeds 5 MB limit.")
+-
+-    try:
+-        return await parse_cv(raw, file.content_type, file.filename or "cv")
+-    except Exception as e:
+-        raise HTTPException(status_code=422, detail=f"CV parsing failed: {e}")
+diff --git a/backend/routers/experience.py b/backend/routers/experience.py
+new file mode 100644
+index 0000000..cdd5efc
+--- /dev/null
++++ b/backend/routers/experience.py
+@@ -0,0 +1,95 @@
++"""
++/api/experience endpoint – stores the freelancer's CV text + portfolio link
++in the database so it persists across visits instead of re-uploading each time.
++"""
++
++from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
++from sqlalchemy.orm import Session
++
++from database import get_db
++from db_models import Experience
++from models import ExperienceResponse
++from services.cv_parser import parse_cv
++
++router = APIRouter()
++
++ALLOWED_TYPES = {
++    "application/pdf",
++    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
++    "application/msword",
++}
++
++MAX_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
++
++
++def _get_or_create(db: Session) -> Experience:
++    exp = db.query(Experience).filter(Experience.id == 1).first()
++    if not exp:
++        exp = Experience(id=1)
++        db.add(exp)
++        db.commit()
++        db.refresh(exp)
++    return exp
++
++
++@router.get("/", response_model=ExperienceResponse)
++async def get_experience(db: Session = Depends(get_db)) -> ExperienceResponse:
++    """Return the currently stored CV + portfolio info, if any."""
++    exp = db.query(Experience).filter(Experience.id == 1).first()
++    if not exp:
++        return ExperienceResponse()
++
++    skills = exp.cv_skills.split(",") if exp.cv_skills else []
++    return ExperienceResponse(
++        cv_filename=exp.cv_filename,
++        cv_skills=[s for s in skills if s],
++        has_cv=bool(exp.cv_text),
++        portfolio_url=exp.portfolio_url,
++    )
++
++
++@router.post("/", response_model=ExperienceResponse)
++async def save_experience(
++    portfolio_url: str = Form(default=""),
++    cv: UploadFile | None = File(default=None),
++    db: Session = Depends(get_db),
++) -> ExperienceResponse:
++    """
++    Save (or update) the freelancer's portfolio link, and optionally a new CV.
++    CV is parsed once here and the extracted text stored — proposal generation
++    reads it back from the database, so it never needs to be re-uploaded.
++    """
++    exp = _get_or_create(db)
++
++    if cv is not None:
++        if cv.content_type not in ALLOWED_TYPES:
++            raise HTTPException(
++                status_code=415,
++                detail=f"Unsupported file type '{cv.content_type}'. Upload a PDF or DOCX.",
++            )
++        raw = await cv.read()
++        if len(raw) > MAX_SIZE_BYTES:
++            raise HTTPException(status_code=413, detail="File exceeds 5 MB limit.")
++
++        try:
++            parsed = await parse_cv(raw, cv.content_type, cv.filename or "cv")
++        except Exception as e:
++            raise HTTPException(status_code=422, detail=f"CV parsing failed: {e}")
++
++        exp.cv_text = parsed.extracted_text
++        exp.cv_filename = cv.filename
++        exp.cv_skills = ",".join(parsed.detected_skills)
++
++    if portfolio_url:
++        exp.portfolio_url = portfolio_url
++
++    db.commit()
++    db.refresh(exp)
++
++    skills = exp.cv_skills.split(",") if exp.cv_skills else []
++    return ExperienceResponse(
++        cv_filename=exp.cv_filename,
++        cv_skills=[s for s in skills if s],
++        has_cv=bool(exp.cv_text),
++        portfolio_url=exp.portfolio_url,
++    )
+diff --git a/backend/routers/linkedin.py b/backend/routers/linkedin.py
+deleted file mode 100644
+index a3b48e3..0000000
+--- a/backend/routers/linkedin.py
++++ /dev/null
+@@ -1,29 +0,0 @@
+-"""
+-/fetch-linkedin endpoint – scrape a public LinkedIn profile page.
+-
+-NOTE: LinkedIn aggressively blocks scrapers. This works on public /in/ pages
+-only when not logged in. For production, prefer LinkedIn's official API.
+-"""
+-
+-from fastapi import APIRouter, HTTPException
+-from models import LinkedInRequest, LinkedInResponse
+-from services.linkedin_scraper import scrape_linkedin
+-
+-router = APIRouter()
+-
+-
+-@router.post("/", response_model=LinkedInResponse)
+-async def fetch_linkedin(body: LinkedInRequest) -> LinkedInResponse:
+-    """
+-    Attempt to scrape a public LinkedIn profile and extract name, headline,
+-    and skills. Returns whatever is publicly visible without authentication.
+-    """
+-    if "linkedin.com/in/" not in body.profile_url:
+-        raise HTTPException(
+-            status_code=422,
+-            detail="URL must be a LinkedIn /in/ profile URL.",
+-        )
+-    try:
+-        return await scrape_linkedin(body.profile_url)
+-    except RuntimeError as e:
+-        raise HTTPException(status_code=502, detail=str(e))
+diff --git a/backend/routers/proposal.py b/backend/routers/proposal.py
+index 2f61055..9f1621a 100644
+--- a/backend/routers/proposal.py
++++ b/backend/routers/proposal.py
+@@ -2,7 +2,10 @@
+ /generate endpoint – proposal generation via Groq LLM.
+ """
+ 
+-from fastapi import APIRouter, HTTPException
++from fastapi import APIRouter, HTTPException, Depends
++from sqlalchemy.orm import Session
++from database import get_db
++from db_models import Experience
+ from models import ProposalRequest, ProposalResponse, Platform, Language
+ from services.proposal import generate_proposal
+ 
+@@ -10,11 +13,19 @@ router = APIRouter()
+ 
+ 
+ @router.post("/generate", response_model=ProposalResponse)
+-async def generate(req: ProposalRequest) -> ProposalResponse:
++async def generate(req: ProposalRequest, db: Session = Depends(get_db)) -> ProposalResponse:
+     """
+     Generate a platform-specific freelance proposal using an LLM.
+-    Accepts optional CV context and skill gap analysis parameters.
++    If cv_context/portfolio_url aren't provided in the request, they're
++    auto-filled from the stored Experience record so the frontend doesn't
++    need to re-send them on every call.
+     """
++    if not req.cv_context or not req.portfolio_url:
++        exp = db.query(Experience).filter(Experience.id == 1).first()
++        if exp:
++            req.cv_context = req.cv_context or exp.cv_text
++            req.portfolio_url = req.portfolio_url or exp.portfolio_url
++
+     try:
+         return await generate_proposal(req)
+     except ValueError as e:
+diff --git a/backend/services/linkedin_scraper.py b/backend/services/linkedin_scraper.py
+deleted file mode 100644
+index 526fc29..0000000
+--- a/backend/services/linkedin_scraper.py
++++ /dev/null
+@@ -1,118 +0,0 @@
+-"""
+-LinkedIn public profile scraper using requests + BeautifulSoup.
+-
+-⚠️  LinkedIn actively blocks bots. This works on truly public profiles
+-    without login. For a production system, use the official LinkedIn API
+-    or a commercial data provider (Proxycurl, etc.).
+-"""
+-
+-import re
+-import asyncio
+-import functools
+-from typing import Optional
+-
+-import requests
+-from bs4 import BeautifulSoup
+-
+-from models import LinkedInResponse
+-
+-HEADERS = {
+-    "User-Agent": (
+-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+-        "AppleWebKit/537.36 (KHTML, like Gecko) "
+-        "Chrome/124.0.0.0 Safari/537.36"
+-    ),
+-    "Accept-Language": "en-US,en;q=0.9",
+-}
+-
+-TIMEOUT = 10  # seconds
+-
+-
+-# ---------------------------------------------------------------------------
+-# Parsing helpers
+-# ---------------------------------------------------------------------------
+-
+-def _parse_page(html: str) -> LinkedInResponse:
+-    soup = BeautifulSoup(html, "html.parser")
+-    raw_text = soup.get_text(separator="\n", strip=True)
+-
+-    # Name – usually in <h1>
+-    name: Optional[str] = None
+-    h1 = soup.find("h1")
+-    if h1:
+-        name = h1.get_text(strip=True) or None
+-
+-    # Headline – <h2> or elements with class patterns containing "headline"
+-    headline: Optional[str] = None
+-    for tag in soup.find_all(["h2", "span", "div"]):
+-        cls = " ".join(tag.get("class", []))
+-        if "headline" in cls.lower():
+-            headline = tag.get_text(strip=True)
+-            break
+-
+-    # Summary – look for "About" section text
+-    summary: Optional[str] = None
+-    about_header = soup.find(string=re.compile(r"^\s*About\s*$", re.I))
+-    if about_header:
+-        parent = about_header.find_parent()
+-        if parent:
+-            sibling = parent.find_next_sibling()
+-            if sibling:
+-                summary = sibling.get_text(strip=True)[:500]
+-
+-    # Skills – naive: any <span> or <li> containing skill-like text
+-    # LinkedIn's public pages rarely expose the full skills list without login.
+-    skill_candidates: list[str] = []
+-    for el in soup.find_all(["span", "li"]):
+-        txt = el.get_text(strip=True)
+-        # Short, non-sentence snippets are likely skill labels
+-        if 2 < len(txt) < 40 and "\n" not in txt:
+-            skill_candidates.append(txt)
+-
+-    # De-duplicate while preserving order; limit to 30
+-    seen: set[str] = set()
+-    skills: list[str] = []
+-    for s in skill_candidates:
+-        if s not in seen:
+-            seen.add(s)
+-            skills.append(s)
+-        if len(skills) >= 30:
+-            break
+-
+-    return LinkedInResponse(
+-        name=name,
+-        headline=headline,
+-        skills=skills,
+-        summary=summary,
+-        raw_text=raw_text[:3000],  # truncate to keep payload sane
+-    )
+-
+-
+-# ---------------------------------------------------------------------------
+-# Synchronous fetch (run in thread pool to avoid blocking the event loop)
+-# ---------------------------------------------------------------------------
+-
+-def _fetch_sync(url: str) -> str:
+-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+-    if resp.status_code == 999:
+-        raise RuntimeError(
+-            "LinkedIn returned 999 (bot detection). "
+-            "Try again later or use the official LinkedIn API."
+-        )
+-    if resp.status_code != 200:
+-        raise RuntimeError(f"LinkedIn returned HTTP {resp.status_code}.")
+-    return resp.text
+-
+-
+-# ---------------------------------------------------------------------------
+-# Public async API
+-# ---------------------------------------------------------------------------
+-
+-async def scrape_linkedin(url: str) -> LinkedInResponse:
+-    loop = asyncio.get_event_loop()
+-    try:
+-        html = await loop.run_in_executor(None, functools.partial(_fetch_sync, url))
+-    except requests.RequestException as e:
+-        raise RuntimeError(f"Network error while fetching LinkedIn profile: {e}")
+-
+-    return _parse_page(html)
+diff --git a/backend/services/proposal.py b/backend/services/proposal.py
+index 7063fec..0a88961 100644
+--- a/backend/services/proposal.py
++++ b/backend/services/proposal.py
+@@ -88,6 +88,9 @@ def _user_prompt(req: ProposalRequest) -> str:
+         # Truncate to avoid context overflow
+         parts.append(f"**CV Summary (first 1500 chars):**\n{req.cv_context[:1500]}")
+ 
++    if req.portfolio_url:
++        parts.append(f"**Portfolio:** {req.portfolio_url}")
++
+     if req.hourly_rate:
+         parts.append(f"**My Rate:** {req.hourly_rate}")
+ 
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 4318cb1..2dee136 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,6 +1,25 @@
+ version: "3.9"
+ 
+ services:
++  # ── PostgreSQL (local dev only — production uses Railway's managed Postgres) ──
++  db:
++    image: postgres:16-alpine
++    container_name: fpw-db
++    environment:
++      - POSTGRES_USER=fpw
++      - POSTGRES_PASSWORD=fpw_local_dev
++      - POSTGRES_DB=fpw
++    volumes:
++      - fpw-db-data:/var/lib/postgresql/data
++    ports:
++      - "5432:5432"
++    restart: unless-stopped
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -U fpw"]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++
+   # ── FastAPI backend ──────────────────────────────────────
+   backend:
+     build:
+@@ -11,8 +30,12 @@ services:
+       - "8000:8000"
+     environment:
+       - GROQ_API_KEY=${GROQ_API_KEY}
++      - DATABASE_URL=postgresql://fpw:fpw_local_dev@db:5432/fpw
+     env_file:
+       - ./backend/.env          # create from .env.example
++    depends_on:
++      db:
++        condition: service_healthy
+     restart: unless-stopped
+     healthcheck:
+       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+@@ -38,3 +61,6 @@ services:
+ networks:
+   default:
+     name: fpw-network
++
++volumes:
++  fpw-db-data:
+diff --git a/frontend/src/app/page.tsx b/frontend/src/app/page.tsx
+index 81dad96..ac408ca 100644
+--- a/frontend/src/app/page.tsx
++++ b/frontend/src/app/page.tsx
+@@ -1,21 +1,31 @@
+ "use client";
+ 
+-import { useState } from "react";
++import { useState, useEffect } from "react";
+ import Sidebar from "@/components/Sidebar";
+ import ProposalForm from "@/components/ProposalForm";
+-import CVUploader from "@/components/CVUploader";
+-import LinkedInFetcher from "@/components/LinkedInFetcher";
++import ExperiencePanel from "@/components/ExperiencePanel";
++import { getExperience } from "@/lib/api";
++import { useProfileStore } from "@/store/profileUploadStore";
+ 
+-type Tab = "generate" | "cv" | "linkedin";
++type Tab = "generate" | "experience";
+ 
+ const TAB_TITLES: Record<Tab, string> = {
+-  generate: "Generate Proposal",
+-  cv:       "Upload Your CV",
+-  linkedin: "LinkedIn Import",
++  generate:   "Generate Proposal",
++  experience: "Experience",
+ };
+ 
+ export default function Home() {
+   const [activeTab, setActiveTab] = useState<Tab>("generate");
++  const setExperience = useProfileStore((s) => s.setExperience);
++
++  useEffect(() => {
++    getExperience()
++      .then(setExperience)
++      .catch(() => {
++        // No stored experience yet — fine, the store keeps its empty defaults
++      });
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
+ 
+   return (
+     <div className="app-shell">
+@@ -38,14 +48,12 @@ export default function Home() {
+           {TAB_TITLES[activeTab]}
+         </h2>
+         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", marginBottom: 24 }}>
+-          {activeTab === "generate" && "Fill in the job details below and let the AI craft the perfect proposal."}
+-          {activeTab === "cv"       && "Upload your CV to auto-detect skills and enrich your proposals."}
+-          {activeTab === "linkedin" && "Import your public LinkedIn profile to pull in your headline and skills."}
++          {activeTab === "generate"   && "Fill in the job details below and let the AI craft the perfect proposal."}
++          {activeTab === "experience" && "Upload your CV and add your portfolio link — saved once, used for every proposal."}
+         </p>
+ 
+-        {activeTab === "generate" && <ProposalForm />}
+-        {activeTab === "cv"       && <CVUploader />}
+-        {activeTab === "linkedin" && <LinkedInFetcher />}
++        {activeTab === "generate"   && <ProposalForm />}
++        {activeTab === "experience" && <ExperiencePanel />}
+       </main>
+     </div>
+   );
+diff --git a/frontend/src/components/CVUploader.tsx b/frontend/src/components/CVUploader.tsx
+deleted file mode 100644
+index a9d8e5d..0000000
+--- a/frontend/src/components/CVUploader.tsx
++++ /dev/null
+@@ -1,120 +0,0 @@
+-"use client";
+-
+-/**
+- * CVUploader – drag-and-drop or click-to-upload CV (PDF/DOCX).
+- * On success, stores extracted text and detected skills in Zustand.
+- */
+-
+-import { useRef, useState, DragEvent, ChangeEvent } from "react";
+-import { uploadCV } from "@/lib/api";
+-import { useProfileStore } from "@/store/profileUploadStore";
+-
+-export default function CVUploader() {
+-  const fileInputRef = useRef<HTMLInputElement>(null);
+-  const [dragging, setDragging] = useState(false);
+-  const [loading, setLoading] = useState(false);
+-  const [error, setError] = useState<string | null>(null);
+-
+-  const { cvUploaded, cvSkills, clearCv, setCvData } = useProfileStore();
+-
+-  const handleFile = async (file: File) => {
+-    setError(null);
+-    setLoading(true);
+-    try {
+-      const result = await uploadCV(file);
+-      setCvData(result.extracted_text, result.detected_skills);
+-    } catch (e: unknown) {
+-      setError(e instanceof Error ? e.message : "Upload failed");
+-    } finally {
+-      setLoading(false);
+-    }
+-  };
+-
+-  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+-    e.preventDefault();
+-    setDragging(false);
+-    const file = e.dataTransfer.files[0];
+-    if (file) handleFile(file);
+-  };
+-
+-  const onChange = (e: ChangeEvent<HTMLInputElement>) => {
+-    const file = e.target.files?.[0];
+-    if (file) handleFile(file);
+-    e.target.value = ""; // reset so re-uploading same file works
+-  };
+-
+-  if (cvUploaded) {
+-    return (
+-      <div className="card">
+-        <div className="card-title">
+-          <span>📄</span> CV Uploaded
+-        </div>
+-        <div className="alert alert-success" style={{ marginBottom: 12 }}>
+-          ✓ CV processed successfully — {cvSkills.length} skills detected.
+-        </div>
+-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+-          {cvSkills.slice(0, 20).map((skill) => (
+-            <span key={skill} className="tag tag-amber">
+-              {skill}
+-            </span>
+-          ))}
+-          {cvSkills.length > 20 && (
+-            <span className="tag tag-blue">+{cvSkills.length - 20} more</span>
+-          )}
+-        </div>
+-        <button className="btn btn-ghost" onClick={clearCv}>
+-          ✕ Remove CV
+-        </button>
+-      </div>
+-    );
+-  }
+-
+-  return (
+-    <div className="card">
+-      <div className="card-title">
+-        <span>📄</span> Upload Your CV
+-      </div>
+-
+-      <div
+-        className={`upload-zone${dragging ? " drag-over" : ""}`}
+-        onClick={() => fileInputRef.current?.click()}
+-        onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+-        onDragLeave={() => setDragging(false)}
+-        onDrop={onDrop}
+-        role="button"
+-        tabIndex={0}
+-        onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+-        aria-label="Upload CV"
+-      >
+-        <div className="upload-zone-icon">{loading ? "⏳" : "📁"}</div>
+-        <div className="upload-zone-label">
+-          {loading ? (
+-            <span>Parsing your CV…</span>
+-          ) : (
+-            <>
+-              <strong>Click to browse</strong> or drag & drop
+-              <br />
+-              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+-                PDF or DOCX · max 5 MB
+-              </span>
+-            </>
+-          )}
+-        </div>
+-      </div>
+-
+-      <input
+-        ref={fileInputRef}
+-        type="file"
+-        accept=".pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+-        style={{ display: "none" }}
+-        onChange={onChange}
+-      />
+-
+-      {error && (
+-        <div className="alert alert-error" style={{ marginTop: 12 }}>
+-          ⚠ {error}
+-        </div>
+-      )}
+-    </div>
+-  );
+-}
+diff --git a/frontend/src/components/ExperiencePanel.tsx b/frontend/src/components/ExperiencePanel.tsx
+new file mode 100644
+index 0000000..6b11ee9
+--- /dev/null
++++ b/frontend/src/components/ExperiencePanel.tsx
+@@ -0,0 +1,170 @@
++"use client";
++
++/**
++ * ExperiencePanel – the "Experience" page.
++ * Lets the user upload a CV (parsed + stored in the database) and set a
++ * portfolio link. Both are saved server-side, so neither needs to be
++ * re-entered on future visits.
++ */
++
++import { useRef, useState, useEffect, DragEvent, ChangeEvent } from "react";
++import { saveExperience } from "@/lib/api";
++import { useProfileStore } from "@/store/profileUploadStore";
++
++export default function ExperiencePanel() {
++  const fileInputRef = useRef<HTMLInputElement>(null);
++  const [dragging, setDragging] = useState(false);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [pendingFile, setPendingFile] = useState<File | null>(null);
++  const [portfolioInput, setPortfolioInput] = useState("");
++
++  const { cvUploaded, cvFilename, cvSkills, portfolioUrl, loaded, setExperience } =
++    useProfileStore();
++
++  // Data is fetched once at the app root (page.tsx); sync the local input
++  // once the store has loaded it, without clobbering in-progress typing.
++  useEffect(() => {
++    if (loaded) setPortfolioInput(portfolioUrl);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [loaded]);
++
++  const pickFile = (file: File) => {
++    setError(null);
++    setPendingFile(file);
++  };
++
++  const onDrop = (e: DragEvent<HTMLDivElement>) => {
++    e.preventDefault();
++    setDragging(false);
++    const file = e.dataTransfer.files[0];
++    if (file) pickFile(file);
++  };
++
++  const onChange = (e: ChangeEvent<HTMLInputElement>) => {
++    const file = e.target.files?.[0];
++    if (file) pickFile(file);
++    e.target.value = "";
++  };
++
++  const handleSave = async () => {
++    setError(null);
++    setLoading(true);
++    try {
++      const result = await saveExperience(portfolioInput, pendingFile);
++      setExperience(result);
++      setPendingFile(null);
++    } catch (e: unknown) {
++      setError(e instanceof Error ? e.message : "Save failed");
++    } finally {
++      setLoading(false);
++    }
++  };
++
++  return (
++    <div>
++      {/* CV upload */}
++      <div className="card">
++        <div className="card-title">
++          <span>📄</span> Your CV
++        </div>
++
++        {cvUploaded && !pendingFile && (
++          <div className="alert alert-success" style={{ marginBottom: 12 }}>
++            ✓ Currently stored: {cvFilename} — {cvSkills.length} skills detected.
++          </div>
++        )}
++
++        <div
++          className={`upload-zone${dragging ? " drag-over" : ""}`}
++          onClick={() => fileInputRef.current?.click()}
++          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
++          onDragLeave={() => setDragging(false)}
++          onDrop={onDrop}
++          role="button"
++          tabIndex={0}
++          onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
++          aria-label="Upload CV"
++        >
++          <div className="upload-zone-icon">📁</div>
++          <div className="upload-zone-label">
++            {pendingFile ? (
++              <span>Selected: <strong>{pendingFile.name}</strong> (not saved yet)</span>
++            ) : (
++              <>
++                <strong>Click to browse</strong> or drag & drop
++                <br />
++                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
++                  PDF or DOCX · max 5 MB {cvUploaded ? "· uploading replaces the stored CV" : ""}
++                </span>
++              </>
++            )}
++          </div>
++        </div>
++
++        <input
++          ref={fileInputRef}
++          type="file"
++          accept=".pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
++          style={{ display: "none" }}
++          onChange={onChange}
++        />
++
++        {cvSkills.length > 0 && (
++          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 16 }}>
++            {cvSkills.slice(0, 20).map((skill) => (
++              <span key={skill} className="tag tag-amber">{skill}</span>
++            ))}
++            {cvSkills.length > 20 && (
++              <span className="tag tag-blue">+{cvSkills.length - 20} more</span>
++            )}
++          </div>
++        )}
++      </div>
++
++      {/* Portfolio link */}
++      <div className="card">
++        <div className="card-title">
++          <span>🔗</span> Portfolio Link
++        </div>
++        <div className="form-group" style={{ marginBottom: 0 }}>
++          <label htmlFor="portfolio-url">Link to your portfolio, personal site, or GitHub</label>
++          <input
++            id="portfolio-url"
++            type="url"
++            placeholder="https://yourportfolio.com"
++            value={portfolioInput}
++            onChange={(e) => setPortfolioInput(e.target.value)}
++          />
++        </div>
++      </div>
++
++      {error && (
++        <div className="alert alert-error" style={{ marginTop: 16 }}>
++          ⚠ {error}
++        </div>
++      )}
++
++      <button
++        className="btn btn-primary btn-full"
++        onClick={handleSave}
++        disabled={loading}
++        style={{ marginTop: 20, padding: "14px 20px", fontSize: "1rem" }}
++      >
++        {loading ? (
++          <>
++            <span className="spinner" /> Saving…
++          </>
++        ) : (
++          "💾 Save Experience"
++        )}
++      </button>
++
++      {loaded && !cvUploaded && !portfolioUrl && (
++        <p style={{ color: "var(--text-muted)", fontSize: "0.8rem", marginTop: 12 }}>
++          Nothing saved yet — upload a CV and/or add a portfolio link, then hit Save.
++        </p>
++      )}
++    </div>
++  );
++}
+diff --git a/frontend/src/components/LinkedInFetcher.tsx b/frontend/src/components/LinkedInFetcher.tsx
+deleted file mode 100644
+index 35ccef3..0000000
+--- a/frontend/src/components/LinkedInFetcher.tsx
++++ /dev/null
+@@ -1,119 +0,0 @@
+-"use client";
+-
+-/**
+- * LinkedInFetcher – fetches a public LinkedIn profile by URL,
+- * stores name, headline and skills in Zustand.
+- */
+-
+-import { useState, ChangeEvent, FormEvent } from "react";
+-import { fetchLinkedIn } from "@/lib/api";
+-import { useProfileStore } from "@/store/profileUploadStore";
+-
+-export default function LinkedInFetcher() {
+-  const [url, setUrl] = useState("");
+-  const [loading, setLoading] = useState(false);
+-  const [error, setError] = useState<string | null>(null);
+-
+-  const { linkedInFetched, linkedInName, linkedInHeadline, linkedInSkills, setLinkedInData, clearLinkedIn } =
+-    useProfileStore();
+-
+-  const handleFetch = async (e: FormEvent) => {
+-    e.preventDefault();
+-    setError(null);
+-
+-    const trimmed = url.trim();
+-    if (!trimmed.includes("linkedin.com/in/")) {
+-      setError("Please enter a valid LinkedIn /in/ profile URL.");
+-      return;
+-    }
+-
+-    setLoading(true);
+-    try {
+-      const result = await fetchLinkedIn(trimmed);
+-      setLinkedInData(result.name ?? "", result.headline ?? "", result.skills);
+-    } catch (e: unknown) {
+-      setError(e instanceof Error ? e.message : "Failed to fetch profile");
+-    } finally {
+-      setLoading(false);
+-    }
+-  };
+-
+-  if (linkedInFetched) {
+-    return (
+-      <div className="card">
+-        <div className="card-title">
+-          <span>🔗</span> LinkedIn Profile
+-        </div>
+-        <div className="alert alert-success" style={{ marginBottom: 12 }}>
+-          ✓ Profile fetched — {linkedInSkills.length} skills found.
+-        </div>
+-        {linkedInName && (
+-          <p style={{ fontWeight: 700, marginBottom: 4 }}>{linkedInName}</p>
+-        )}
+-        {linkedInHeadline && (
+-          <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", marginBottom: 12 }}>
+-            {linkedInHeadline}
+-          </p>
+-        )}
+-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+-          {linkedInSkills.slice(0, 15).map((skill) => (
+-            <span key={skill} className="tag tag-blue">
+-              {skill}
+-            </span>
+-          ))}
+-          {linkedInSkills.length > 15 && (
+-            <span className="tag tag-amber">+{linkedInSkills.length - 15} more</span>
+-          )}
+-        </div>
+-        <button className="btn btn-ghost" onClick={clearLinkedIn}>
+-          ✕ Clear Profile
+-        </button>
+-      </div>
+-    );
+-  }
+-
+-  return (
+-    <div className="card">
+-      <div className="card-title">
+-        <span>🔗</span> Import from LinkedIn
+-      </div>
+-      <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginBottom: 16 }}>
+-        Enter a public LinkedIn profile URL to auto-import your skills and headline.
+-        <br />
+-        <em style={{ color: "var(--text-muted)" }}>
+-          Note: Only works on truly public profiles (no login required).
+-        </em>
+-      </p>
+-
+-      <form onSubmit={handleFetch}>
+-        <div className="form-group">
+-          <label htmlFor="linkedin-url">Profile URL</label>
+-          <input
+-            id="linkedin-url"
+-            type="url"
+-            placeholder="https://linkedin.com/in/your-profile"
+-            value={url}
+-            onChange={(e: ChangeEvent<HTMLInputElement>) => setUrl(e.target.value)}
+-            disabled={loading}
+-          />
+-        </div>
+-
+-        {error && (
+-          <div className="alert alert-error" style={{ marginBottom: 12 }}>
+-            ⚠ {error}
+-          </div>
+-        )}
+-
+-        <button className="btn btn-ghost btn-full" type="submit" disabled={loading || !url}>
+-          {loading ? (
+-            <>
+-              <span className="spinner" /> Fetching…
+-            </>
+-          ) : (
+-            "Fetch Profile"
+-          )}
+-        </button>
+-      </form>
+-    </div>
+-  );
+-}
+diff --git a/frontend/src/components/ProposalForm.tsx b/frontend/src/components/ProposalForm.tsx
+index f8981eb..cef97d6 100644
+--- a/frontend/src/components/ProposalForm.tsx
++++ b/frontend/src/components/ProposalForm.tsx
+@@ -2,7 +2,7 @@
+ 
+ /**
+  * ProposalForm – the main proposal generation form.
+- * Reads merged skills from the Zustand store (CV + LinkedIn) and
++ * Reads detected CV skills from the Zustand store and
+  * injects them automatically into the request.
+  */
+ 
+@@ -57,7 +57,7 @@ export default function ProposalForm() {
+   const [error, setError] = useState<string | null>(null);
+   const [result, setResult] = useState<ProposalResponse | null>(null);
+ 
+-  const { mergedSkills, cvText, cvUploaded, linkedInFetched } = useProfileStore();
++  const { cvSkills } = useProfileStore();
+ 
+   const set = (field: keyof FormState) =>
+     (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+@@ -73,8 +73,8 @@ export default function ProposalForm() {
+     setError(null);
+     setLoading(true);
+ 
+-    // Build merged skills string: profile skills + any extra typed by user
+-    const profileSkillsStr = mergedSkills.join(", ");
++    // Build merged skills string: CV skills + any extra typed by user
++    const profileSkillsStr = cvSkills.join(", ");
+     const allSkills = [profileSkillsStr, form.extraSkills]
+       .filter(Boolean)
+       .join(", ");
+@@ -87,8 +87,8 @@ export default function ProposalForm() {
+       freelancer_skills: allSkills || undefined,
+       hourly_rate: form.hourlyRate || undefined,
+       delivery_days: form.deliveryDays ? parseInt(form.deliveryDays) : undefined,
+-      // Inject CV text if available (backend truncates to 1500 chars)
+-      cv_context: cvUploaded ? cvText : undefined,
++      // cv_context and portfolio_url are auto-filled server-side from the
++      // stored Experience record — no need to send them from here.
+     };
+ 
+     try {
+@@ -192,9 +192,9 @@ export default function ProposalForm() {
+           <div className="form-group" style={{ marginBottom: 0 }}>
+             <label htmlFor="extra-skills">
+               Skills{" "}
+-              {mergedSkills.length > 0 ? (
++              {cvSkills.length > 0 ? (
+                 <span className="tag tag-green" style={{ marginLeft: 6, verticalAlign: "middle" }}>
+-                  {mergedSkills.length} from profile
++                  {cvSkills.length} from profile
+                 </span>
+               ) : null}
+             </label>
+@@ -202,20 +202,20 @@ export default function ProposalForm() {
+               id="extra-skills"
+               type="text"
+               placeholder={
+-                mergedSkills.length > 0
++                cvSkills.length > 0
+                   ? "Add more skills (optional, comma-separated)"
+                   : "Python, SQL, FastAPI… (comma-separated)"
+               }
+               value={form.extraSkills}
+               onChange={set("extraSkills")}
+             />
+-            {mergedSkills.length > 0 && (
++            {cvSkills.length > 0 && (
+               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
+-                {mergedSkills.slice(0, 12).map((s) => (
++                {cvSkills.slice(0, 12).map((s) => (
+                   <span key={s} className="tag tag-amber">{s}</span>
+                 ))}
+-                {mergedSkills.length > 12 && (
+-                  <span className="tag tag-blue">+{mergedSkills.length - 12}</span>
++                {cvSkills.length > 12 && (
++                  <span className="tag tag-blue">+{cvSkills.length - 12}</span>
+                 )}
+               </div>
+             )}
+diff --git a/frontend/src/components/Sidebar.tsx b/frontend/src/components/Sidebar.tsx
+index 4a756ed..8363c87 100644
+--- a/frontend/src/components/Sidebar.tsx
++++ b/frontend/src/components/Sidebar.tsx
+@@ -8,12 +8,11 @@ interface SidebarProps {
+ }
+ 
+ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+-  const { cvUploaded, linkedInFetched, mergedSkills } = useProfileStore();
++  const { cvUploaded, portfolioUrl, cvSkills } = useProfileStore();
+ 
+   const navItems = [
+-    { id: "generate",  icon: "✨", label: "Generate Proposal" },
+-    { id: "cv",        icon: "📄", label: "Upload CV",       badge: cvUploaded ? "✓" : undefined },
+-    { id: "linkedin",  icon: "🔗", label: "LinkedIn Import", badge: linkedInFetched ? "✓" : undefined },
++    { id: "generate",   icon: "✨", label: "Generate Proposal" },
++    { id: "experience", icon: "📄", label: "Experience", badge: cvUploaded || portfolioUrl ? "✓" : undefined },
+   ];
+ 
+   return (
+@@ -36,18 +35,18 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
+         </button>
+       ))}
+ 
+-      {mergedSkills.length > 0 && (
++      {cvSkills.length > 0 && (
+         <>
+           <div className="divider" />
+           <div className="nav-section-label">Profile Skills</div>
+           <div style={{ padding: "0 12px", display: "flex", flexWrap: "wrap", gap: 4 }}>
+-            {mergedSkills.slice(0, 10).map((s) => (
++            {cvSkills.slice(0, 10).map((s) => (
+               <span key={s} className="tag tag-amber" style={{ marginBottom: 2 }}>
+                 {s}
+               </span>
+             ))}
+-            {mergedSkills.length > 10 && (
+-              <span className="tag tag-blue">+{mergedSkills.length - 10}</span>
++            {cvSkills.length > 10 && (
++              <span className="tag tag-blue">+{cvSkills.length - 10}</span>
+             )}
+           </div>
+         </>
+diff --git a/frontend/src/lib/api.ts b/frontend/src/lib/api.ts
+index 708421b..1817b5c 100644
+--- a/frontend/src/lib/api.ts
++++ b/frontend/src/lib/api.ts
+@@ -31,6 +31,7 @@ export interface ProposalRequest {
+   hourly_rate?: string;
+   delivery_days?: number;
+   cv_context?: string;
++  portfolio_url?: string;
+ }
+ 
+ export interface ProposalResponse {
+@@ -43,19 +44,11 @@ export interface ProposalResponse {
+   word_count: number;
+ }
+ 
+-export interface CVUploadResponse {
+-  extracted_text: string;
+-  detected_skills: string[];
+-  file_type: string;
+-  char_count: number;
+-}
+-
+-export interface LinkedInResponse {
+-  name: string | null;
+-  headline: string | null;
+-  skills: string[];
+-  summary: string | null;
+-  raw_text: string;
++export interface ExperienceResponse {
++  cv_filename: string | null;
++  cv_skills: string[];
++  has_cv: boolean;
++  portfolio_url: string | null;
+ }
+ 
+ // ── API functions ─────────────────────────────────────────────────────────
+@@ -70,22 +63,20 @@ export async function generateProposal(
+   });
+ }
+ 
+-export async function uploadCV(file: File): Promise<CVUploadResponse> {
+-  const form = new FormData();
+-  form.append("file", file);
+-  return request<CVUploadResponse>("/upload-cv/", {
+-    method: "POST",
+-    body: form,
+-  });
++export async function getExperience(): Promise<ExperienceResponse> {
++  return request<ExperienceResponse>("/api/experience/", { method: "GET" });
+ }
+ 
+-export async function fetchLinkedIn(
+-  profile_url: string
+-): Promise<LinkedInResponse> {
+-  return request<LinkedInResponse>("/fetch-linkedin/", {
++export async function saveExperience(
++  portfolioUrl: string,
++  cvFile?: File | null
++): Promise<ExperienceResponse> {
++  const form = new FormData();
++  form.append("portfolio_url", portfolioUrl);
++  if (cvFile) form.append("cv", cvFile);
++  return request<ExperienceResponse>("/api/experience/", {
+     method: "POST",
+-    headers: { "Content-Type": "application/json" },
+-    body: JSON.stringify({ profile_url }),
++    body: form,
+   });
+ }
+ 
+diff --git a/frontend/src/store/profileUploadStore.ts b/frontend/src/store/profileUploadStore.ts
+index 015c390..8e96211 100644
+--- a/frontend/src/store/profileUploadStore.ts
++++ b/frontend/src/store/profileUploadStore.ts
+@@ -1,91 +1,57 @@
+ /**
+- * profileUploadStore – Zustand slice that tracks CV and LinkedIn profile data
+- * so it can be injected into proposal generation requests.
++ * profileUploadStore – Zustand slice that tracks the freelancer's stored
++ * Experience (CV skills + portfolio link) so it can be reflected in the UI.
++ * The actual CV text lives server-side in the database — this store only
++ * mirrors the summary info (filename, detected skills, portfolio link).
+  */
+ 
+ import { create } from "zustand";
+ 
+ export interface ProfileState {
+-  /** Raw text extracted from the uploaded CV */
+-  cvText: string;
+   /** Skills detected from CV by the backend */
+   cvSkills: string[];
+-  /** Whether a CV has been successfully uploaded */
++  /** Filename of the currently stored CV, if any */
++  cvFilename: string | null;
++  /** Whether a CV is currently stored in the database */
+   cvUploaded: boolean;
+ 
+-  /** LinkedIn profile data */
+-  linkedInName: string;
+-  linkedInHeadline: string;
+-  linkedInSkills: string[];
+-  linkedInFetched: boolean;
+-
+-  /** Merged skill list (CV + LinkedIn, de-duplicated) */
+-  mergedSkills: string[];
++  /** Portfolio link stored in the database */
++  portfolioUrl: string;
++  /** Whether the profile has been loaded from the backend at least once */
++  loaded: boolean;
+ }
+ 
+ export interface ProfileActions {
+-  setCvData: (text: string, skills: string[]) => void;
+-  setLinkedInData: (name: string, headline: string, skills: string[]) => void;
+-  clearCv: () => void;
+-  clearLinkedIn: () => void;
++  setExperience: (data: {
++    cv_filename: string | null;
++    cv_skills: string[];
++    has_cv: boolean;
++    portfolio_url: string | null;
++  }) => void;
+   resetAll: () => void;
+ }
+ 
+ type ProfileStore = ProfileState & ProfileActions;
+ 
+ const INITIAL_STATE: ProfileState = {
+-  cvText: "",
+   cvSkills: [],
++  cvFilename: null,
+   cvUploaded: false,
+-  linkedInName: "",
+-  linkedInHeadline: "",
+-  linkedInSkills: [],
+-  linkedInFetched: false,
+-  mergedSkills: [],
++  portfolioUrl: "",
++  loaded: false,
+ };
+ 
+-/** Merge two skill arrays, lower-case & de-duplicate */
+-function mergeSkills(a: string[], b: string[]): string[] {
+-  const set = new Set([...a, ...b].map((s) => s.toLowerCase().trim()));
+-  return Array.from(set).sort();
+-}
+-
+-export const useProfileStore = create<ProfileStore>((set, get) => ({
++export const useProfileStore = create<ProfileStore>((set) => ({
+   ...INITIAL_STATE,
+ 
+-  setCvData: (text, skills) =>
+-    set((state) => ({
+-      cvText: text,
+-      cvSkills: skills,
+-      cvUploaded: true,
+-      mergedSkills: mergeSkills(skills, state.linkedInSkills),
+-    })),
+-
+-  setLinkedInData: (name, headline, skills) =>
+-    set((state) => ({
+-      linkedInName: name,
+-      linkedInHeadline: headline,
+-      linkedInSkills: skills,
+-      linkedInFetched: true,
+-      mergedSkills: mergeSkills(state.cvSkills, skills),
+-    })),
+-
+-  clearCv: () =>
+-    set((state) => ({
+-      cvText: "",
+-      cvSkills: [],
+-      cvUploaded: false,
+-      mergedSkills: mergeSkills([], state.linkedInSkills),
+-    })),
+-
+-  clearLinkedIn: () =>
+-    set((state) => ({
+-      linkedInName: "",
+-      linkedInHeadline: "",
+-      linkedInSkills: [],
+-      linkedInFetched: false,
+-      mergedSkills: mergeSkills(state.cvSkills, []),
+-    })),
++  setExperience: (data) =>
++    set({
++      cvFilename: data.cv_filename,
++      cvSkills: data.cv_skills,
++      cvUploaded: data.has_cv,
++      portfolioUrl: data.portfolio_url ?? "",
++      loaded: true,
++    }),
+ 
+   resetAll: () => set(INITIAL_STATE),
+ }));

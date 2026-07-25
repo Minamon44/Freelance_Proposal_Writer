@@ -1,21 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Sidebar from "@/components/Sidebar";
 import ProposalForm from "@/components/ProposalForm";
-import CVUploader from "@/components/CVUploader";
-import LinkedInFetcher from "@/components/LinkedInFetcher";
+import ExperiencePanel from "@/components/ExperiencePanel";
+import { getExperience } from "@/lib/api";
+import { useProfileStore } from "@/store/profileUploadStore";
 
-type Tab = "generate" | "cv" | "linkedin";
+type Tab = "generate" | "experience";
 
 const TAB_TITLES: Record<Tab, string> = {
-  generate: "Generate Proposal",
-  cv:       "Upload Your CV",
-  linkedin: "LinkedIn Import",
+  generate:   "Generate Proposal",
+  experience: "Experience",
 };
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("generate");
+  const setExperience = useProfileStore((s) => s.setExperience);
+
+  useEffect(() => {
+    getExperience()
+      .then(setExperience)
+      .catch(() => {
+        // No stored experience yet — fine, the store keeps its empty defaults
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="app-shell">
@@ -38,14 +48,12 @@ export default function Home() {
           {TAB_TITLES[activeTab]}
         </h2>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", marginBottom: 24 }}>
-          {activeTab === "generate" && "Fill in the job details below and let the AI craft the perfect proposal."}
-          {activeTab === "cv"       && "Upload your CV to auto-detect skills and enrich your proposals."}
-          {activeTab === "linkedin" && "Import your public LinkedIn profile to pull in your headline and skills."}
+          {activeTab === "generate"   && "Fill in the job details below and let the AI craft the perfect proposal."}
+          {activeTab === "experience" && "Upload your CV and add your portfolio link — saved once, used for every proposal."}
         </p>
 
-        {activeTab === "generate" && <ProposalForm />}
-        {activeTab === "cv"       && <CVUploader />}
-        {activeTab === "linkedin" && <LinkedInFetcher />}
+        {activeTab === "generate"   && <ProposalForm />}
+        {activeTab === "experience" && <ExperiencePanel />}
       </main>
     </div>
   );

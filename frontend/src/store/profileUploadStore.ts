@@ -1,91 +1,57 @@
 /**
- * profileUploadStore – Zustand slice that tracks CV and LinkedIn profile data
- * so it can be injected into proposal generation requests.
+ * profileUploadStore – Zustand slice that tracks the freelancer's stored
+ * Experience (CV skills + portfolio link) so it can be reflected in the UI.
+ * The actual CV text lives server-side in the database — this store only
+ * mirrors the summary info (filename, detected skills, portfolio link).
  */
 
 import { create } from "zustand";
 
 export interface ProfileState {
-  /** Raw text extracted from the uploaded CV */
-  cvText: string;
   /** Skills detected from CV by the backend */
   cvSkills: string[];
-  /** Whether a CV has been successfully uploaded */
+  /** Filename of the currently stored CV, if any */
+  cvFilename: string | null;
+  /** Whether a CV is currently stored in the database */
   cvUploaded: boolean;
 
-  /** LinkedIn profile data */
-  linkedInName: string;
-  linkedInHeadline: string;
-  linkedInSkills: string[];
-  linkedInFetched: boolean;
-
-  /** Merged skill list (CV + LinkedIn, de-duplicated) */
-  mergedSkills: string[];
+  /** Portfolio link stored in the database */
+  portfolioUrl: string;
+  /** Whether the profile has been loaded from the backend at least once */
+  loaded: boolean;
 }
 
 export interface ProfileActions {
-  setCvData: (text: string, skills: string[]) => void;
-  setLinkedInData: (name: string, headline: string, skills: string[]) => void;
-  clearCv: () => void;
-  clearLinkedIn: () => void;
+  setExperience: (data: {
+    cv_filename: string | null;
+    cv_skills: string[];
+    has_cv: boolean;
+    portfolio_url: string | null;
+  }) => void;
   resetAll: () => void;
 }
 
 type ProfileStore = ProfileState & ProfileActions;
 
 const INITIAL_STATE: ProfileState = {
-  cvText: "",
   cvSkills: [],
+  cvFilename: null,
   cvUploaded: false,
-  linkedInName: "",
-  linkedInHeadline: "",
-  linkedInSkills: [],
-  linkedInFetched: false,
-  mergedSkills: [],
+  portfolioUrl: "",
+  loaded: false,
 };
 
-/** Merge two skill arrays, lower-case & de-duplicate */
-function mergeSkills(a: string[], b: string[]): string[] {
-  const set = new Set([...a, ...b].map((s) => s.toLowerCase().trim()));
-  return Array.from(set).sort();
-}
-
-export const useProfileStore = create<ProfileStore>((set, get) => ({
+export const useProfileStore = create<ProfileStore>((set) => ({
   ...INITIAL_STATE,
 
-  setCvData: (text, skills) =>
-    set((state) => ({
-      cvText: text,
-      cvSkills: skills,
-      cvUploaded: true,
-      mergedSkills: mergeSkills(skills, state.linkedInSkills),
-    })),
-
-  setLinkedInData: (name, headline, skills) =>
-    set((state) => ({
-      linkedInName: name,
-      linkedInHeadline: headline,
-      linkedInSkills: skills,
-      linkedInFetched: true,
-      mergedSkills: mergeSkills(state.cvSkills, skills),
-    })),
-
-  clearCv: () =>
-    set((state) => ({
-      cvText: "",
-      cvSkills: [],
-      cvUploaded: false,
-      mergedSkills: mergeSkills([], state.linkedInSkills),
-    })),
-
-  clearLinkedIn: () =>
-    set((state) => ({
-      linkedInName: "",
-      linkedInHeadline: "",
-      linkedInSkills: [],
-      linkedInFetched: false,
-      mergedSkills: mergeSkills(state.cvSkills, []),
-    })),
+  setExperience: (data) =>
+    set({
+      cvFilename: data.cv_filename,
+      cvSkills: data.cv_skills,
+      cvUploaded: data.has_cv,
+      portfolioUrl: data.portfolio_url ?? "",
+      loaded: true,
+    }),
 
   resetAll: () => set(INITIAL_STATE),
 }));
